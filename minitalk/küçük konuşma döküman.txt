@@ -1,0 +1,385 @@
+Minitalk
+çalışan bir programda bir şey gerçekleştiğinde sinyalin bunu iletme yolları vardır : 
+Signal ———————-Örnek sebep——————————-standart sonuç
+SIGABRT           	   abort();				   Process i sonladırır
+SIGFPE		   uygulama tanımlanmış                       process i sonlandırır
+SIGILL			   illegal talimat			   “”””
+SIGINT			   Ctrl-C				   “”””
+SIGSEGV		   gerçesiz adres			   “””””
+SIGTERM		   kill <pid>				   “”””
+
+SIGSTOP		   Ctrl-Z				process I durdurur
+SIGSTOP		   kill -SIGSTOP <pid>		“”””
+SIGCONT		   kill -SIGCONT <pid>		process I devam ettirir
+SIGBUS		  atınmamış memory izni		process i sonlandırır
+SIGKILL		   kill -SIGKILL <pid>			“”
+SIGKILL		  kill -9 <pid>				“”
+SIGKILL		  kill -9 -u stilid				stilid in process ini sonlandırır
+			  kill -l					tüm sinyalleri listeler
+
+
+							(geri döndürülecek olan eski hanelerin 										bilgisi)(NULL is umursanmaz)
+*sigaction(SIGHUP, &newact, &oldact ) ;
+		      |—>Sinyal tipi.        |
+					     |
+					*sa_handler(SIG_IGN)(SIG_DFL)
+Handler çalışırken bloklanmak için ayarlanmış sinyaller—->*sa_mask
+					*sa_flags(opsiyonel flag örneğin SA_RESTART  otomatik olarak kesintiye uğramış sistem çağrılarına ceset atar)
+handler(…)
+{
+      …….
+}
+                       *THE sigaction Structure
+Struct sigaction {
+     Void (*sa_handler)(int);
+     sigset_t  sa_mask;
+     İnt     sa_flags;
+};
+SA_NODEFER = kendi Signal hadleri tarafından alınmış sinyalleri engelleme
+SA_RESTART = kesinti uğramış sinyalleri otomatik olarak restart atmayı etkinleştirir
+SA_RESETHAND = signal handler tarafından çıktı girilmemiş sinyalleri default hallerini dönüştür.
+                                    *Signal Sets
+sigset_t veri tipi sinyal setlerini boolean dizi olarak temsil eder
+Sinyal Yakalama ve Gönderme
+Sinyal Yakalama
+Uygulama tarafından yakalanabilmesine izin verilen sinyaller, ilgili fonksiyonlar kullanılarak uygulama içerisinde yakalanıp işlenecek hale getirilir. Bunun için temel olarak, yakalamak istediğimiz sinyalleri belirlemek ve bu sinyalleri işleyecek callback fonksiyonlarını hazırlamamız gerekir.
+Sinyal işleme sürecinde aynı callback fonksiyonunu birden fazla sinyal için kullanmamız da mümkündür. Asenkron olarak çağırılacak callback fonksiyonunun prototipi aşağıdaki gibidir:
+typedef void (*sighandler_t)(int);
+Parametre olarak gelen int değeri, sinyalin numarasını gösterecektir.
+Yakalamak istediğimiz sinyal ve karşılayacak callback fonksiyonunu belirtmek için signal veya sigaction fonksiyonları kullanılır. Kullanım prototipleri aşağıdaki gibidir:
+sighandler_t signal(int signum, sighandler_t handler);
+
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
+
+struct sigaction {
+    void        (*sa_handler)(int);
+    void        (*sa_sigaction)(int, siginfo_t *, void *);
+    sigset_t    sa_mask;
+    int         sa_flags;
+    void        (*sa_restorer)(void);
+};
+signal kullanımı artık önerilmemektedir, bunun yerine daha fazla kontrol sunan sigaction kullanımı tercih edilmelidir. Zaten günümüzde glibc içerisindeki signal gerçekleştirimi de sigaction fonksiyonunu sarmalayan bir yapıdan ibarettir.
+Aşağıdaki örnek uygulamayı sample.c adında kaydediniz.
+#include <stdio.h>
+#include <unistd.h>
+#include <signal.h>
+#include <string.h>
+
+static int exit_flag = 0;
+
+static void handler (int signum)
+{
+    if (signum == SIGTERM) {
+        printf("TERM signal received, exiting program\n");
+        exit_flag = 1;
+    } else {
+        printf("Not a TERM signal: %d (%s)\n", signum, strsignal(signum));
+    }
+}
+
+int main (int argc, char *argv[])
+{
+    struct sigaction act;
+
+    memset (&act, '\0', sizeof(act));
+    act.sa_handler = &handler;
+    if (sigaction(SIGTERM, &act, NULL) < 0) {
+        perror ("sigaction");
+        return 1;
+    }
+    if (sigaction(SIGINT, &act, NULL) < 0) {
+        perror ("sigaction");
+        return 1;
+    }
+
+    while (!exit_flag) usleep(100000);
+
+    return 0;
+}
+Sonrasında aşağıdaki gibi derleme işlemini yapıp çalıştıralım:
+$ gcc -o sample sample.c
+$ ./sample
+Uygulamayı çalıştırdıktan sonra CTRL-C tuş kombinasyonu ile INT sinyali ürettiğimizde sigaction ile belirttiğimiz callback fonksiyonumuzun devreye girdiğini, TERM sinyali dışında bir sinyal geldiği için uyarı mesajı verip çalışmasına devam ettiğini görmekteyiz.
+Başka bir konsoldan uygulamamıza kill komutu ile TERM sinyalini gönderdiğimizde ise beklediğimiz gibi exit_flag değişkeninin değerinin 1 yapılmak suretiyle sonlandığını görmekteyiz. Bu şekilde uygulama sonlandığında çıkış değerinin de $? kabuk değişkeninde beklediğimiz üzere 0 olduğunu görüyoruz:
+$ ./sample
+$ (diger konsoldan) kill -s SIGTERM $(pidof sample)
+TERM signal received, exiting program
+$ echo $?
+0
+Bu noktada şu soruyu kendimize soralım: Test uygulamamız çalışıyorken diğer konsoldan uygulama içerisinde işlediğimiz TERM ve INT sinyalleri dışında, örneğin USR2 sinyalini gönderirsek ne olur?
+$ ./sample
+$ (diger konsoldan) kill -s SIGUSR2 $(pidof sample)
+User defined signal 2
+$ echo $?
+140
+Yukarıda görüldüğü üzere, uygulamamız USR1 sinyalini aldığında, User defined signal 2 mesajıyla sonlandı. Bu bizim uygulama içerisinden bastırdığımız bir mesaj değil. Ayrıca uygulamanın çıkış değeri önceki örnekte olduğu gibi 0 değil, 140 oldu.
+Uygulamada nasıl işleneceği düzenlenmiş olmayan bir sinyal geldiğinde, ilgili sinyalin önceki bölümde vermiş olduğumuz tabloda yer alan öntanımlı eylemi gerçekleşir. SIGUSR2 sinyalinin öntanımlı eylemi de uygulamayı durdurmak olduğu için uygulamamız sonlandı. Eğer öntanımlı eylemi yoksay şeklinde olan örneğin SIGURG sinyalini göndermiş olsaydık, uygulamamız çalışmasına bir şey olmamış gibi devam edecekti:
+$ ./sample
+$ (diger konsoldan) kill -s SIGURG $(pidof sample)
+Bu bilgiler ışığında, uygulamalarımızda sinyallere karşı önlem almadığımızda, beklenmeyen bir sinyalin bize ulaşması nedeniyle kontrolsüz sonlanmalara yol açacağını rahatlıkla söyleyebiliriz.
+Sinyal Gönderme
+Uygulama içerisinden sinyal göndermek için prototipi aşağıda belirtilen kill fonksiyonu kullanılır:
+int kill(pid_t pid, int sig);
+Fonksiyon basitçe parametre olarak verilmiş olan PID değerine sahip uygulamaya istenen sinyalin gönderimini sağlamaktadır. İşlemin gerçekleşebilmesi için ilgili uygulamaya sinyal gönderebilme yetkisinin olması gerekir. Örnek olarak A kullanıcısı B kullanıcısının uygulamalarına sinyal gönderemez, ancak kendi sahip olduğu uygulamalara sinyal gönderebilir.
+Sistemdeki root kullanıcısı veya Linux Capabilities API üzerinden CAP_KILL kabiliyetine sahip olan uygulamalar ise herhangi bir uygulamaya sinyal gönderebilirler.
+Uygulama dışından genel amaçlı sinyal gönderme işlemleri için kill komutunu kullanabilirsiniz.
+Uygulama içerisinden bir başka uygulama yerine, çalışan uygulamanın kendisine sinyal gönderilmek istendiğinde raise ve abort fonksiyonları kullanılır.
+
+———————BİT BAZLI İŞLEMLER—————————
+Bir bite 1 değerini atamak (set)
+Bir bite 0 değerini atamak (Reset)
+Bitleri sağa kaydırmak
+Bitleri sola kaydırmak
+Bitleri karşılaştırmak
+
+Örnek kod Açıklama = 
+while (*str)
+    {
+        i = 8;// char 8 byte olduğu için 8 aldık
+        c = *str++;// c stringimize eşitledik
+        while (i—)// her defasında bir sonraki biti alması için eksilttik bunu + değilde - almamızın sebebi bitsel dönüşümler ile alakalı (bknz binary to int or char)
+        {
+            if (c >> i & 1)// her defasında i. Karakterin 1 olup olmadığını kontrol ediyor bir ise SIGUSR1 SİNYALİNİ YOLLUYOR
+                kill(pid, SIGUSR1);
+            else // eğer 0 ise SIGUSR2 sinyalini yolluyor
+                kill(pid, SIGUSR2);
+            usleep(50);
+        }// 1 ve 0 için ayrı sinyal yollamamızın sebebi sinyal aynı anda tek iş yapabiliyor yani 1 ve sıfırı aynı anda gönderemez
+    }
+
+—> c >> i & 1 bu ne demek : 
+
+
+Bu ifade, bir değişkenin içeriğini sağa kaydırarak, bir bit değerini almaya çalışır. Örneğin, eğer c değişkeni 5 (binary 0101) ise ve i değeri 2 ise, c >> i & 1 ifadesi 1 (binary 0001) döndürür.
+operatörü, bir değişkenin içeriğini sağa kaydırır. Örneğin, c değişkeni 5 (binary 0101) ise ve i değeri 2 ise, c >> i ifadesi 1 (binary 0001) döndürür.
+& operatörü, iki değişkenin binary (ikilik) değerlerini karşılaştırarak, sonuçta 1 olan bitlerin bulunduğu bir binary değer döndürür. Örneğin, 5 (binary 0101) ve 3 (binary 0011) değişkenlerini karşılaştırırsak, 1 (binary 0001) döndürür.
+Bu ifade, c değişkeninin içeriğini sağa kaydırarak, i bitini almaya çalışır ve bu bit 1 ise 1, değilse 0 döndürür. Eğer c değişkeni 5 (binary 0101) ise ve i değeri 2 ise, c >> i & 1 ifadesi 1 (binary 0001) döndürür.
+
+—> str = str | 1; ne demek : 
+str = str | 1 ifadesi, bir değişkenin (str) değerine bir sayı (1) ile bitsel bir veya (|) işleminin uygulanmasını ifade eder. Bitsel bir veya işlemi, iki sayının her bitini tek tek karşılaştırarak, eğer birinin biti sıfır ise diğerinin aynı bitinin değeri korunur, eğer birinin biti bir ise sonuç olarak bu bitin değeri bir olur. Örneğin,
+
+
+5 (dörtlü tabanda 0101) 
+| 1 (dörtlü tabanda 0001)
+= 5 (dörtlü tabanda 0101)
+str = str | 1 ifadesi, str değişkeninin değerine bir sayı (1) ile bitsel bir veya işleminin uygulanarak, bu değişkenin değerinin değiştiğini ifade eder. Ancak bu ifade tek başına anlamlı bir kod parçası değildir, çünkü str değişkeninin hangi değere atandığı ve bu değişkenin ne için kullanıldığı bilinmiyor. Bu ifade anlamlı bir şekilde ancak başka bir kod parçası içinde kullanılabilecektir.
+
+
+Byte ile oyun oynamak:
+
+void	handler(int sig)
+{
+	static char	str = 0;
+	static int	get_byte = 0;
+
+	if (sig == 1)
+		str = str | 1;
+	if (++get_byte == 8)
+	{
+		get_byte = 0;
+		if (!str)
+			printf("\n");
+		printf("%c", str);// 0100011 I char halinin yazıyor
+		str = 0;
+	}
+	else
+		str <<= 1;// byte kaydırarak 0100011 i oluşturuyor
+}
+int main()
+{
+    int i;
+    for (i = 0;i < 8 ; i++){
+        if (i == 1 || i == 6 || i == 7)// 0100011 bunu oluşturuyo
+            handler(1);
+        else
+            handler(0);
+    }
+    
+
+    return 0;
+}
+
+void    ft_kill(int pid, char *str)
+{
+    int     i;
+    char    c;
+
+    while (*str)
+    {
+        i = 8;
+        c = *str++;
+        while (i--)
+        {
+            if (c >> i & 1)
+                kill(pid, SIGUSR1);
+            else
+                kill(pid, SIGUSR2);
+            usleep(50);
+        }
+    }
+    i = 8;
+    while (i--)
+    {
+        kill(pid, SIGUSR2);
+        usleep(50);// bunun anlamı 50 mikrosaniye uyutuyor 
+			   // sebebi ise linux sinyalleri sıraya koymaz bizim sıraya koymamız gerek
+    }
+}
+
+
+
+sigaction yapısı :imzayapısı şu şekilde tanımlanır:
+             struct sigaction {
+                   void       (*sa_handler)(int);
+                   sigset_t   sa_mask;
+                   int        sa_flags;
+                   void       (*sa_sigaction)(int, siginfo_t *, void *);
+             };
+
+Aşağıdakiler yapının üyeleridir:
+geçersiz (*)(int) sa_handler
+Sinyali işlemek için atanan işleve işaretçi. Bu üyenin değeri ayrıca SIG_DFL (varsayılan eylemi gösterir) veya SIG_IGN (sinyalin yok sayılacağını gösterir) olabilir.
+XPG4.2 için özel davranış : Bu üye vesa_sigactionkarşılıklı olarak birbirini dışlar. SA_SIGINFO bayrağı ayarlandığındasa_flagssonrasa_sigactionkullanıldı. Aksi halde,sa_handlerkullanıldı.
+sigset_t sa_mask
+Bir sinyal seti, sinyal işleme işlevi sa_handler veya sa_sigaction ( XPG4.2'de ) çağrılmadan önce çağıran sürecin sinyal maskesine eklenecek olan bir dizi sinyali tanımlar . Sinyal kümeleri hakkında daha fazla bilgi için bkz. sigemptyset() — Tüm sinyalleri hariç tutmak için bir sinyal maskesini başlat . SIGKILL, SIGSTOP veya SIGTRACE'i engellemek için bu mekanizmayı kullanamazsınız. sa_mask bu sinyalleri içeriyorsa, basitçe yok sayılırlar; sigaction() bir hata döndürmez.
+sa_mask, bir veya daha fazla sinyal seti manipülasyon işlevi kullanılarak ayarlanmalıdır: sigemptyset(), sigfillset(), sigaddset() veya sigdelset()
+int sa_flags
+Sinyallerin davranışını etkileyen bayrak bitlerinin bir koleksiyonu. Aşağıdaki bayrak bitleri sa_flags içinde ayarlanabilir:
+
+
+
+SA_SIGINFO
+Sisteme tarafından belirtilen sinyal eylemini kullanmasını söyler.sa_sigactiononun yerinesa_handler.
+Bu bayrak kapalı olduğunda ve eylem sinyali yakalamak olduğunda, tarafından belirtilen sinyal işleyici işlevisa_handlerolarak çağrılır:
+   geçersiz işlev(int oturumu );
+Burada signo , sinyal işleyiciye yönelik tek argümandır ve sinyal işleyici işlevinin çağrılmasına neden olan sinyal tipini belirtir.
+Bu bayrak açık olduğunda ve eylem sinyali yakalamak olduğunda, tarafından belirtilen sinyal işleyici işlevisa_sigactionolarak çağrılır:
+   geçersiz işlev (int oturum açma, siginfo_t * bilgi , geçersiz * bağlam );
+Sinyal işleyici işlevine iki ek argümanın iletildiği yer. İkinci bağımsız değişken bir NULL işaretçisi değilse, türde bir nesneye işaret edecektir.siginfo_tsinyalin kaynağı hakkında ek bilgi sağlar. Asiginfo_tnesne, aşağıdaki üyeleri içeren bir yapıdır:
+si_signo
+Sistem tarafından üretilen sinyal numarasını içerir
+si_errno
+Uygulamaya özgü hata bilgilerini içerir (bu uygulamada kullanılmaz)
+si_kodu
+Sinyalin nedenini tanımlayan bir kod içerir (bu kodların listesi ve anlamları için <signal.h> içerme dosyasına bakın, bkz . Tablo 1 ).
+Eğersi_signoSIGPOLL içerir o zamansi_koduSI_ASYNCIO olarak ayarlanabilir. Aksi takdirde, si_code değeri sıfıra eşit veya sıfırdan küçükse, sinyal başka bir işlem tarafından üretilmiştir vesi_pidvesi_uidüyeler, sırasıyla, bu sinyali gönderenin işlem kimliğini ve gerçek kullanıcı kimliğini belirtir.
+eğer değerisi_kodusıfırdan küçük veya sıfıra eşitse, sinyal başka bir işlem tarafından üretildi vesi_pidvesi_uidüyeler, sırasıyla, bu sinyali gönderenin işlem kimliğini ve gerçek kullanıcı kimliğini belirtir.
+si_pid
+eğer değerisi_kodusıfırdan küçük veya sıfıra eşitse, bu üye bu sinyali gönderenin işlem kimliğini gösterecektir. Aksi halde bu üye anlamsızdır.
+si_uid
+eğer değerisi_kodusıfırdan küçük veya sıfıra eşitse, bu üye bu sinyali gönderenin gerçek kullanıcı kimliğini gösterecektir. Aksi halde bu üye anlamsızdır.
+si_value
+Eğersi_koduSI_ASYNCIO, si_value, uygulamada belirtilen değeri içerir. Aksi takdirde, si_value içeriği tanımsızdır.
+Üçüncü bağımsız değişken, türde bir nesneye işaret edecektir.ucontext_t(bu nesnenin içeriğinin açıklaması için <ucontext.h> dahil etme dosyasına bakın).
+
+
+
+client_id = info->si_pid;
+Bu kod satırı, bir sinyali işleyen işlemin (client process) PID değerini kaydeder. Bu değer, daha sonra kullanılmak üzere saklanır. Bu değer, sinyal işleyicisinin bir sonraki çağrısında kullanılır ve bu sayede, sinyal işleyicisi hangi işleme ait olduğunu anlayabilir.
+
+
+Bu kod parçacığı, sigaction() fonksiyonunu kullanarak iki sinyal için (SIGUSR1 ve SIGUSR2) sinyal işleyicilerini tanımlar. Öncelikle, "client" isimli bir sigaction yapısı oluşturulur ve bu yapıya sinyal işleyicisi (sig_usr) atanır. Daha sonra, bu yapının 
+struct sigaction	client;
+
+	client.sa_sigaction = sig_usr;
+	client.sa_flags = SA_SIGINFO;
+	ft_printf("process_id => %d\n", getpid());
+	sigaction(SIGUSR1, &client, 0);
+	sigaction(SIGUSR2, &client, 0);
+
+"sa_flags" değerine "SA_SIGINFO" ataması yapılır. Bu, sinyal işleyicisinin sinyal ile birlikte sinyal hakkında daha fazla bilgi almasını sağlar.
+Son olarak, sigaction() fonksiyonu kullanılarak, SIGUSR1 ve SIGUSR2 sinyalleri için sinyal işleyicisi tanımlanır. Bu tanımlamalar, sinyaller geldiğinde sig_usr fonksiyonunun nasıl çalışacağını belirtir. Bu fonksiyon, sinyalleri işleyecek ve gerekli işlemleri yapacaktır.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+static char		str = 0;
+	static pid_t	client_id = 0;
+	static int		get_byte = 0;
+
+	(void)context;
+	if (client_id == 0)
+		client_id = info->si_pid;
+Bu kod parçacığı, sig_usr fonksiyonunun içinde bulunan bir kod bloğudur. Bu blok, sinyal işleyicisinin işlemeye başladığında çalıştırılan kodlardır. Öncelikle, üç adet static değişken tanımlanır: str, client_id ve get_byte.
+str değişkeni, sinyal işleyicisinin alacağı bitleri tutmak için kullanılır. client_id değişkeni ise, sinyal işleyicisine ait olan işlem (client process) PID değerini tutar. get_byte değişkeni ise, işlenen bitlerin sayısını tutar.Daha sonra, bir koşul ifadesi kullanılarak client_id değişkeninin 0 olup olmadığı kontrol edilir. Eğer client_id 0 ise, bu değişkene sinyal ile birlikte gelen bilgilerden (info) işlemin PID değeri atanır. Bu sayede, sinyal işleyicisi bir sonraki çağrısında hangi işleme ait olduğunu anlayabilir.
+
+NAMESERVER = server // sunucu kodu için oluşturulacak 
+//yürütülebilir dosyanın adı
+NAMECLIENT = client// client için oluşturulacak exec dosyanın adı
+NAMESERVERBNS = server_bonus// bonus server için oluşturulacak exec dosya adı
+NAMECLIENTBNS = client_bonus // bonus client için oluşturulacak exec dosyanın adı
+NAME = none.c
+LIB = ./ft_printf/libftprintf.a
+SRCSERVER = server.c
+SRCCLIENT = client.c
+SRCSERVERBNS = server_bonus.c
+SRCCLIENTBNS = client_bonus.c
+FLAGS = -Wall -Wextra -Werror
+CC = gcc
+OBJSERVER = $(SRCSERVER:.c=.o)
+OBJCLIENT = $(SRCCLIENT:.c=.o)
+OBJSERVERBNS = $(SRCSERVERBNS:.c=.o)
+OBJCLIENTBNS = $(SRCCLIENTBNS:.c=.o)
+all: $(LIB) $(NAMESERVER) $(NAMECLIENT)
+$(NAME) : all
+bonus: $(LIB) $(NAMESERVERBNS) $(NAMECLIENTBNS)
+$(LIB):
+    make -C ./ft_printf
+$(NAMESERVER) : $(OBJSERVER)
+    $(CC) $(OBJSERVER) -o $(NAMESERVER) $(LIB)
+$(NAMECLIENT) : $(OBJCLIENT)
+    $(CC) $(OBJCLIENT) -o $(NAMECLIENT) $(LIB)
+$(NAMESERVERBNS) : $(OBJSERVERBNS)
+    $(CC) $(OBJSERVERBNS) -o $(NAMESERVERBNS) $(LIB)
+$(NAMECLIENTBNS) : $(OBJCLIENTBNS)
+    $(CC) $(OBJCLIENTBNS) -o $(NAMECLIENTBNS) $(LIB)
+clean:
+    rm -rf $(OBJSERVER) $(OBJCLIENT) $(OBJSERVERBNS) $(OBJCLIENTBNS)
+fclean: clean
+    rm -rf $(NAMESERVER) $(NAMECLIENT) $(NAMESERVERBNS) $(NAMECLIENTBNS)
+ffclean: fclean
+    make fclean -C ./ft_printf
+.c.o:
+    $(CC) $(FLAGS) -c $^ -o $@
+norm:
+    norminette *.[ch]
+re:fclean all
+.PHONY : re fclean clean all ffclean norm
+
+Bu, C programlama dilinde bir Makefile'dir. Makefile'ler, C veya diğer programlama dillerinde yazılmış kod oluşturma ve yürütme sürecini otomatikleştirmek için kullanılır.
+Bu Makefile'da, başlangıçta tanımlanan birkaç değişken vardır:
+NAMESERVER: Sunucu kodu için oluşturulacak yürütülebilir dosyanın adı
+NAMECLIENT: yürütülebilir dosyanın adı
+N
+NAMECLIENTBNS: İstemci bonus kodu için oluşturulacak yürütülebilir dosyanın adı
+NAME: Ana kaynak dosyanın adı
+LIB: Yürütülebilir dosyalara bağlanacak bir kitaplık dosyasının yolu
+SRCSERVER: Sunucu kodu için kaynak dosya
+SRCCLIENT: İstemci kodu için kaynak dosya
+SRCSERVERBNS: Sunucu bonus kodu için kaynak dosya
+SRCLIENTBNS: İstemci bonus kodu için kaynak dosya
+FLAGS: Derleyiciye iletilecek derleyici bayrakları
+CC: Kullanılacak derleyici (bu durumda gcc)
+OBJSERVER: Sunucu kodu için nesne dosyası
+OBJCLIENT: İstemci kodu için nesne dosyası
+OBJSERVERBNS: Sunucu bonus kodu için nesne dosyası
+OBJCLIENTBNS: İstemci bonus kodu için nesne dosyası
+Makefile ayrıca, hedef adının ardından "make" komutunu çalıştırarak yürütülebilecek birkaç "hedef" veya eylem tanımlar. Örneğin, "tümünü yap" komutunun çalıştırılması, sunucu ve istemci kodu için yürütülebilir dosyaları oluşturur. "make bonus" komutunun çalıştırılması, sunucu bonusu ve müşteri bonus kodu için yürütülebilir dosyaları oluşturacaktır.
+"temiz" hedef, nesne dosyalarını kaldıracak, "fclean" hedefi, nesne dosyalarını ve yürütülebilir dosyaları kaldıracak ve "ffclean" hedefi, nesne dosyalarını, yürütülebilir dosyaları kaldıracak ve ayrıca "./ft_printf" içindeki "fclean" hedefini çalıştıracaktır. dizin. "Yeniden" hedef, "fclean" hedefini ve ardından "all" hedefini çalıştıracaktır.
+".co" hedefi, Makefile'a kaynak dosyalardan nesne dosyalarını nasıl oluşturacağını söyleyen bir model kuralıdır. Derleyiciyi belirtilen bayraklarla çalıştırarak ve nesne dosyasını kitaplık dosyasına bağlayarak ".c" uzantılı herhangi bir dosyanın ".o" uzantılı bir dosyaya dönüştürülebileceğini söylüyor.
+"norm" hedefi, kodu biçimlendirme ve stil sorunları açısından kontrol eden ".c" veya ".h" uzantılı tüm dosyalarda "norminette" aracını çalıştırır.
+Makefile dosyasının sonundaki ".PHONY" satırı, gerçek dosyalarla ilişkili olmayan hedeflerin bir listesini belirtir. Bu, hedefle aynı ada sahip dosyalarla çakışmaları önlemek için kullanılır.
+
+
+
